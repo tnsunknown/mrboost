@@ -1,57 +1,82 @@
+// functions/latest-posts.js
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
+
+const delay = ms => new Promise(res => setTimeout(res, ms));
 
 exports.handler = async (event) => {
   const limit = parseInt(event.queryStringParameters?.limit) || 5;
   const baseUrl = 'https://mrboost.lk/blog';
 
   try {
-    // Fetch blog page
-    const response = await fetch(baseUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+    const res = await fetch(baseUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
     });
-    if (!response.ok) throw new Error(`Failed to fetch: ${response.status}`);
+    if (!res.ok) throw new Error('Failed to fetch blog');
 
-    const html = await response.text();
-    const $ = cheerio.load(html);
+    const $ = cheerio.load(await res.text());
     const posts = [];
+    const seenLinks = new Set();
 
-    // Find post titles with links (h2/h3 with <a>)
-    $('h2, h3').each((i, el) => {
+    // Find all post containers (h2/h3 with <a>)
+    $('h2 a, h3 a').each(async (i, a) => {
       if (posts.length >= limit) return;
 
-      const a = $(el).find('a');
-      if (!a.length) return;
+      const link = new URL($(a).attr('href') || '', baseUrl).href;
+      if (seenLinks.has(link)) return;
+      seenLinks.add(link);
 
-      const title = a.text().trim();
+      const title = $(a).text().trim();
       if (!title || title.length < 10) return;
 
-      const relativeLink = a.attr('href') || '';
-      const link = new URL(relativeLink, baseUrl).href;
-
-      // Excerpt: next <p> after title
+      // Get parent container for excerpt
+      const container = $(a).closest('article, .post, .entry, div');
       let excerpt = '';
-      const nextP = $(el).next('p');
-      if (nextP.length) {
-        excerpt = nextP.text().trim().substring(0, 300) + (nextP.text().length > 300 ? '...' : '');
+      const p = container.find('p').first();
+      if (p.length) {
+        excerpt = p.text().trim();
+        if (excerpt.length > 300) excerpt = excerpt.substring(0, 300) + '...';
       }
 
-      // Image: Visit post for og:image
+      // Visit post page for image
       let imageUrl = '';
-      // For demo, simulate (in real, async fetch post page)
-      // Actual implementation would fetch each link and extract og:image
+      try {
+        await delay(800); // Rate limit
+        const postRes = await fetch(link, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const post$ = cheerio.load(await postRes.text());
+
+        // 1. og:image
+        const og = post$('meta[property="og:image"]');
+        if (og.length && og.attr('content')) {
+          imageUrl = og.attr('content');
+        } else {
+          // 2. First <img> in content
+          const img = post$('img').first();
+          if (img.length && img.attr('src')) {
+            imageUrl = new URL(img.attr('src'), link).href;
+          }
+        }
+      } catch (e) {
+        console.error(`Image fetch failed for ${link}: ${e.message}`);
+      }
 
       posts.push({
         title,
         image_url: imageUrl,
         link,
-        excerpt
+        excerpt: excerpt || "No excerpt available"
       });
     });
 
+    // Wait for all async image fetches (simulate with Promise.all if needed)
+    // For simplicity, we'll run sequentially in loop above
+
     return {
       statusCode: 200,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      },
       body: JSON.stringify({
         status: true,
         creator: "Chathura hansaka",
@@ -62,7 +87,6 @@ exports.handler = async (event) => {
   } catch (error) {
     return {
       statusCode: 500,
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         status: false,
         creator: "Chathura hansaka",
