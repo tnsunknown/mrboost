@@ -12,64 +12,70 @@ exports.handler = async (event) => {
     const res = await fetch(baseUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0' }
     });
-    if (!res.ok) throw new Error('Failed to fetch blog');
+    if (!res.ok) throw new Error(`Failed to fetch blog: ${res.status}`);
 
     const $ = cheerio.load(await res.text());
-    const posts = [];
-    const seenLinks = new Set();
+    const postPromises = [];
 
-    // Find all post containers (h2/h3 with <a>)
-    $('h2 a, h3 a').each(async (i, a) => {
-      if (posts.length >= limit) return;
-
-      const link = new URL($(a).attr('href') || '', baseUrl).href;
-      if (seenLinks.has(link)) return;
-      seenLinks.add(link);
-
-      const title = $(a).text().trim();
-      if (!title || title.length < 10) return;
-
-      // Get parent container for excerpt
-      const container = $(a).closest('article, .post, .entry, div');
-      let excerpt = '';
-      const p = container.find('p').first();
-      if (p.length) {
-        excerpt = p.text().trim();
-        if (excerpt.length > 300) excerpt = excerpt.substring(0, 300) + '...';
-      }
-
-      // Visit post page for image
-      let imageUrl = '';
-      try {
-        await delay(800); // Rate limit
-        const postRes = await fetch(link, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-        const post$ = cheerio.load(await postRes.text());
-
-        // 1. og:image
-        const og = post$('meta[property="og:image"]');
-        if (og.length && og.attr('content')) {
-          imageUrl = og.attr('content');
-        } else {
-          // 2. First <img> in content
-          const img = post$('img').first();
-          if (img.length && img.attr('src')) {
-            imageUrl = new URL(img.attr('src'), link).href;
-          }
+    // Collect all post links first
+    const links = new Set();
+    $('h2 a, h3 a').each((i, a) => {
+      if (links.size >= limit) return;
+      const href = $(a).attr('href');
+      if (href) {
+        const fullLink = new URL(href, baseUrl).href;
+        if (!links.has(fullLink)) {
+          links.add(fullLink);
+          postPromises.push({ link: fullLink, title: $(a).text().trim() });
         }
-      } catch (e) {
-        console.error(`Image fetch failed for ${link}: ${e.message}`);
       }
-
-      posts.push({
-        title,
-        image_url: imageUrl,
-        link,
-        excerpt: excerpt || "No excerpt available"
-      });
     });
 
-    // Wait for all async image fetches (simulate with Promise.all if needed)
-    // For simplicity, we'll run sequentially in loop above
+    // Scrape each post in parallel
+    const posts = await Promise.all(
+      Array.from(links).slice(0, limit).map(async (link, idx) => {
+        const title = postPromises.find(p => p.link === link)?.title || 'No title';
+        if (!title || title.length < 10) return null;
+
+        let excerpt = '';
+        let imageUrl = '';
+
+        try {
+          await delay(600 * (idx + 1)); // Rate limit
+          const postRes = await fetch(link, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+          const post$ = cheerio.load(await postRes.text());
+
+          // Excerpt: First <p> in content
+          const p = post$('article p, .entry-content p, .post-content p').first();
+          if (p.length) {
+            excerpt = p.text().trim();
+            if (excerpt.length > 300) excerpt = excerpt.substring(0, 300) + '...';
+          }
+
+          // Image: og:image or first img
+          const og = post$('meta[property="og:image"]');
+          if (og.length && og.attr('content')) {
+            imageUrl = og.attr('content');
+          } else {
+            const img = post$('img').first();
+            if (img.length && img.attr('src')) {
+              imageUrl = new URL(img.attr('src'), link).href;
+            }
+          }
+        } catch (e) {
+          console.error(`Failed to scrape ${link}: ${e.message}`);
+        }
+
+        return {
+          title,
+          image_url: imageUrl,
+          link,
+          excerpt: excerpt || "No excerpt available"
+        };
+      })
+    );
+
+    const validPosts = posts.filter(p => p !== null);
 
     return {
       statusCode: 200,
@@ -80,7 +86,7 @@ exports.handler = async (event) => {
       body: JSON.stringify({
         status: true,
         creator: "Chathura hansaka",
-        posts
+        posts: validPosts
       }, null, 2)
     };
 
